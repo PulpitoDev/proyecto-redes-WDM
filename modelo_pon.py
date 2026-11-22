@@ -1,23 +1,18 @@
-# === Librerías ===
 import json, math, random, time, sys
 import networkx as nx, pulp as pl
+from visualizar_pon import graficar
 
-# === Parámetros (FICTICIOS: reemplazar por valores documentados) ===
-n_total = 3000                                   # clientes totales (caso base)
-NIVELES = [100, 500, 1000]                       # tasa mínima simétrica por zona (Mbps)
-PUERTOS = {"GPON": (2488, 1244, 10.0),           # tipo: (bajada Mbps, subida Mbps, costo normalizado)
+n_total = 3000
+NIVELES = [100, 500, 1000]
+PUERTOS = {"GPON": (2488, 1244, 10.0),
            "XG-PON": (9953, 2488, 18.0),
            "XGS-PON": (9953, 9953, 25.0)}
-K_R = {8: 0.8, 16: 1.2}                          # costo normalizado del splitter 1:r
-LMAX = {8: 20.0, 16: 14.0}                       # alcance por razón (km)
-DMAX, P_MAX = 20.0, 400                          # alcance máximo (km) y puertos de la OLT
-BETA, ALFA = 0.5, 8.0                            # costo de fibra por km y de zanja por km
+K_R = {8: 0.8, 16: 1.2}
+LMAX = {8: 20.0, 16: 14.0}
+DMAX, P_MAX = 20.0, 400
+BETA, ALFA = 0.5, 8.0
 CONFIGS = [(t, r) for t in PUERTOS for r in K_R]
-LIMITE_S = 10                                    # segundos máximos por MILP
-
-# === Estructura "mundo" (la misma para datos sintéticos y reales) ===
-# n[i], zona[i]: clientes y zona de cada punto de demanda; J: nodos candidatos de splitter; sitios: candidatos de OLT
-# dsj[s][j]: km por calle OLT->nodo ; dji[j][i]: km por calle nodo->punto ; rutas[s][j]: tramos de la ruta ; largo[e]: km del tramo
+LIMITE_S = 10
 
 def mundo_sintetico(n_puntos=24):
     rng = random.Random(0)
@@ -33,9 +28,16 @@ def mundo_sintetico(n_puntos=24):
     J = [v for v in G if v not in riesgo and (v[0] + v[1]) % 2 == 0]
     sitios = [v for v in G if v[0] % 2 == 0 and v[1] % 2 == 0 and v not in riesgo]
     dist = dict(nx.all_pairs_dijkstra_path_length(G, weight="l"))
+    xy_nodos = {}
+    for v in G.nodes:
+        xy_nodos[nm(v)] = [float(v[0]), float(v[1])]
+    xy_puntos = {}
+    for p in puntos:
+        xy_puntos[nm(p)] = [float(p[0]), float(p[1])]
     mundo = dict(n={nm(p): q for p, q in zip(puntos, n)}, zona={nm(p): f"{p[0]//3}_{p[1]//3}" for p in puntos},
                  J=[nm(j) for j in J], sitios=[nm(s) for s in sitios], dsj={}, dji={}, rutas={},
-                 largo={ek(a, b): G[a][b]["l"] for a, b in G.edges})
+                 largo={ek(a, b): G[a][b]["l"] for a, b in G.edges},
+                 xy_nodos=xy_nodos, xy_puntos=xy_puntos)
     for s in sitios:
         paths = nx.single_source_dijkstra_path(G, s, weight="l")
         mundo["dsj"][nm(s)] = {nm(j): dist[s][j] for j in J}
@@ -47,10 +49,9 @@ def mundo_sintetico(n_puntos=24):
 def cargar_mundo(ruta):
     with open(ruta, encoding="utf-8") as f: return json.load(f)
 
-# === MILP de diseño de la PON para una OLT fija en s ===
 def resolver(s, mundo, m, limite=LIMITE_S):
     n, J, dsj, dji, rutas, largo = (mundo[k] for k in ("n", "J", "dsj", "dji", "rutas", "largo"))
-    pares = {}                                                          # (i,j) -> configuraciones admisibles
+    pares = {}
     for j in J:
         if j not in dsj[s]: continue
         for i, dij in dji[j].items():
@@ -77,18 +78,18 @@ def resolver(s, mundo, m, limite=LIMITE_S):
     por_i, por_jc = {}, {}
     for k in tern:
         por_i.setdefault(k[0], []).append(k); por_jc.setdefault((k[1], k[2]), []).append(k)
-    for i in cubiertos: mod += pl.lpSum(a[k] for k in por_i[i]) == 1                          # (1) asignación única
+    for i in cubiertos: mod += pl.lpSum(a[k] for k in por_i[i]) == 1
     for (j, c), ks in por_jc.items():
-        mod += pl.lpSum(n[k[0]] * a[k] for k in ks) <= c[1] * x[(j, c)]                      # (2) capacidad
-        for k in ks: mod += a[k] <= w[j]                                                      # (3) nodo activo
+        mod += pl.lpSum(n[k[0]] * a[k] for k in ks) <= c[1] * x[(j, c)]
+        for k in ks: mod += a[k] <= w[j]
     for j in Ju:
-        for e in rutas[s][j]: mod += g[e] >= w[j]                                             # (4) zanja compartida
-    mod += pl.lpSum(x.values()) <= P_MAX                                                      # (5) puertos de la OLT
+        for e in rutas[s][j]: mod += g[e] >= w[j]
+    mod += pl.lpSum(x.values()) <= P_MAX
     t0 = time.time()
     mod.solve(pl.PULP_CBC_CMD(msg=False, timeLimit=limite, gapRel=0.02))
     est = pl.LpStatus[mod.status]
     if est != "Optimal": return dict(estado=est, cob=cob, costo=None, t=time.time() - t0)
-    est = "Optimo" if mod.sol_status == 1 else "Factible"          # Factible = límite de tiempo, sin prueba de optimalidad
+    est = "Optimo" if mod.sol_status == 1 else "Factible"
     sirve = {k[0]: k for k in tern if a[k].value() > 0.5}
     assert set(sirve) == cubiertos, "punto sin servir"
     carga = {}
@@ -99,21 +100,40 @@ def resolver(s, mundo, m, limite=LIMITE_S):
     puertos = sum(round(v.value()) for v in x.values())
     assert puertos <= P_MAX
     cuenta = lambda f: sum(round(x[k].value()) for k in x if f(k[1]))
+
+    splitters = []
+    for clave in x:
+        cantidad = int(round(x[clave].value()))
+        if cantidad > 0:
+            splitters.append([clave[0], clave[1][0], clave[1][1], cantidad])
+    asignacion = {}
+    for i in sirve:
+        terna = sirve[i]
+        asignacion[i] = [terna[1], terna[2][0], terna[2][1]]
+    zanja = []
+    for e in E:
+        if g[e].value() > 0.5:
+            zanja.append(e)
+    tasa = {}
+    for i in n:
+        tasa[i] = m[i]
+    solucion = dict(sitio=s, splitters=splitters, asignacion=asignacion, zanja=zanja,
+                    sin_cobertura=sorted(set(n) - cubiertos), tasa=tasa)
+
     return dict(estado=est, cob=cob, costo=pl.value(mod.objective), puertos=puertos, t=time.time() - t0,
                 gpon=cuenta(lambda c: c[0] == "GPON"), xg=cuenta(lambda c: c[0] == "XG-PON"),
-                xgs=cuenta(lambda c: c[0] == "XGS-PON"), r8=cuenta(lambda c: c[1] == 8))
+                xgs=cuenta(lambda c: c[0] == "XGS-PON"), r8=cuenta(lambda c: c[1] == 8),
+                solucion=solucion)
 
-# === Barrido de sitios para una semilla ===
-TOL_COB = 0.005                                   # tolerancia de cobertura (0,5 puntos)
+TOL_COB = 0.005
 
 def barrido(semilla, mundo, verbose=True):
     rng = random.Random(semilla)
     zonas = sorted(set(mundo["zona"].values()))
-    mz = {z: rng.choice(NIVELES) for z in zonas}                       # tasa mínima por zona (sorteo con semilla)
+    mz = {z: rng.choice(NIVELES) for z in zonas}
     m = {i: mz[z] for i, z in mundo["zona"].items()}
     res = {s: resolver(s, mundo, m) for s in mundo["sitios"]}
     ok = {s: r for s, r in res.items() if r["costo"] is not None}
-    # === Selección: cobertura con tolerancia, luego menor costo ===
     mejor = None
     if ok:
         mejor_cob = max(r["cob"] for r in ok.values())
@@ -128,15 +148,17 @@ def barrido(semilla, mundo, verbose=True):
         print("  -> mejor sitio:", mejor)
     return mejor, ok.get(mejor)
 
-#if __name__ == "__main__":
-    # uso: python modelo_pon.py sintetico 1 2 3   |   python modelo_pon.py datos_pon.json 1 2 3
-    fuente, semillas = sys.argv[1], [int(a) for a in sys.argv[2:]] or [1]
-    mundo = mundo_sintetico() if fuente == "sintetico" else cargar_mundo(fuente)
-    N_TOTAL = sum(mundo["n"].values())
-    for sm in semillas: barrido(sm, mundo)
-
 if __name__ == "__main__":
     fuente = sys.argv[1] if len(sys.argv) > 1 else "sintetico"
     semillas = [int(a) for a in sys.argv[2:]] or [1]
     mundo = mundo_sintetico() if fuente == "sintetico" else cargar_mundo(fuente)
-    for sm in semillas: barrido(sm, mundo)
+    for semilla in semillas:
+        mejor, resultado = barrido(semilla, mundo)
+        if mejor is None:
+            continue
+        ruta_json = f"solucion_pon_semilla{semilla}.json"
+        with open(ruta_json, "w", encoding="utf-8") as archivo:
+            json.dump(dict(semilla=semilla, sitio=mejor, resultado=resultado), archivo)
+        ruta_png = f"red_pon_semilla{semilla}.png"
+        graficar(mundo, resultado, mejor, semilla, ruta_png, mostrar=False)
+        print("Guardado:", ruta_json, ruta_png)
