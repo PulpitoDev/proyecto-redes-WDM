@@ -3,7 +3,7 @@ import json, math, random, time, sys
 import networkx as nx, pulp as pl
 
 # === Parámetros (FICTICIOS: reemplazar por valores documentados) ===
-N_TOTAL = 3000                                   # clientes totales (caso base)
+n_total = 3000                                   # clientes totales (caso base)
 NIVELES = [100, 500, 1000]                       # tasa mínima simétrica por zona (Mbps)
 PUERTOS = {"GPON": (2488, 1244, 10.0),           # tipo: (bajada Mbps, subida Mbps, costo normalizado)
            "XG-PON": (9953, 2488, 18.0),
@@ -26,8 +26,8 @@ def mundo_sintetico(n_puntos=24):
     riesgo = {v for v in G if v[0] >= 8 and v[1] <= 2}
     puntos = rng.sample(sorted(G.nodes), n_puntos)
     w = [rng.uniform(0.5, 1.5) for _ in puntos]
-    n = [max(1, round(N_TOTAL * x / sum(w))) for x in w]
-    n[0] += N_TOTAL - sum(n)
+    n = [max(1, round(n_total * x / sum(w))) for x in w]
+    n[0] += n_total - sum(n)
     nm = lambda v: f"{v[0]}_{v[1]}"
     ek = lambda a, b: "|".join(sorted((nm(a), nm(b))))
     J = [v for v in G if v not in riesgo and (v[0] + v[1]) % 2 == 0]
@@ -117,20 +117,26 @@ def barrido(semilla, mundo, verbose=True):
     mejor = None
     if ok:
         mejor_cob = max(r["cob"] for r in ok.values())
-        cand = {s: r for s, r in ok.items() if r["cob"] >= mejor_cob - TOL_COB * N_TOTAL}
+        cand = {s: r for s, r in ok.items() if r["cob"] >= mejor_cob - TOL_COB * n_total}
         mejor = min(cand, key=lambda s: cand[s]["costo"])
     if verbose:
         print(f"Semilla {semilla}: zonas con 100/500/1000 Mbps =", [list(mz.values()).count(v) for v in NIVELES])
         for s in mundo["sitios"]:
             r = res[s]
-            print(f"  sitio {s}: cobertura {100 * r['cob'] / N_TOTAL:5.1f}% | estado {r['estado']:10s} |",
+            print(f"  sitio {s}: cobertura {100 * r['cob'] / n_total:5.1f}% | estado {r['estado']:10s} |",
                   "costo ---" if r["costo"] is None else f"costo {r['costo']:8.1f} | puertos {r['puertos']:3d} | t {r['t']:.1f}s")
         print("  -> mejor sitio:", mejor)
     return mejor, ok.get(mejor)
 
-if __name__ == "__main__":
+#if __name__ == "__main__":
     # uso: python modelo_pon.py sintetico 1 2 3   |   python modelo_pon.py datos_pon.json 1 2 3
     fuente, semillas = sys.argv[1], [int(a) for a in sys.argv[2:]] or [1]
     mundo = mundo_sintetico() if fuente == "sintetico" else cargar_mundo(fuente)
     N_TOTAL = sum(mundo["n"].values())
+    for sm in semillas: barrido(sm, mundo)
+
+if __name__ == "__main__":
+    fuente = sys.argv[1] if len(sys.argv) > 1 else "sintetico"
+    semillas = [int(a) for a in sys.argv[2:]] or [1]
+    mundo = mundo_sintetico() if fuente == "sintetico" else cargar_mundo(fuente)
     for sm in semillas: barrido(sm, mundo)
